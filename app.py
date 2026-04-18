@@ -108,7 +108,11 @@ def home() -> str:
           const res = await fetch('/query', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({query: document.getElementById('queryText').value, use_llm: true})
+            body: JSON.stringify({
+              query: document.getElementById('queryText').value,
+              use_llm: true,
+              llm_required: true
+            })
           });
           const data = await res.json();
           render(data);
@@ -120,7 +124,8 @@ def home() -> str:
             : trace.llm_fallback
               ? 'Answer source: Template fallback'
               : 'Answer source: Template';
-          document.getElementById('answerSource').textContent = source;
+          const failureReason = trace.llm_failure_reason ? `\nLLM failure: ${trace.llm_failure_reason}` : '';
+          document.getElementById('answerSource').textContent = source + failureReason;
           document.getElementById('answer').textContent = data.answer || data.detail || '';
           document.getElementById('evidence').textContent = JSON.stringify(data.evidence || data, null, 2);
           document.getElementById('trace').textContent = JSON.stringify(trace, null, 2);
@@ -189,6 +194,7 @@ def query(request: QueryRequest) -> dict[str, Any]:
             trace=STATE["trace"],
             top_k=request.top_k,
             use_llm=request.use_llm,
+            llm_required=request.llm_required,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

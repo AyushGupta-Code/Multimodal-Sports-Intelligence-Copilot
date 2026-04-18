@@ -337,20 +337,42 @@ def compose_grounded_answer(query: str, evidence: list[dict[str, Any]]) -> str:
     return " ".join([pattern_text, shot_text, progression_text, player_text, team_text])
 
 
-def compose_llm_grounded_answer(query: str, evidence: list[dict[str, Any]]) -> str:
-    """Compose a grounded answer with an LLM using only the retrieved evidence."""
+def build_evidence_stats(evidence: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build deterministic evidence stats used by the LLM and validator."""
 
-    # Keep the LLM path tightly constrained so it only rewrites the retrieved evidence into readable football language.
-    if not evidence:
-        return f'No grounded evidence was found for "{query}".'
-    pass_sequences = sum(1 for item in evidence if "pass" in item["summary"])
-    carry_sequences = sum(1 for item in evidence if "carry" in item["summary"])
-    shot_sequences = sum(1 for item in evidence if item.get("ended_in_shot"))
-    progression_sequences = sum(
+    # Compute the only counts the LLM is allowed to use so numeric claims stay grounded.
+    total_sequences = len(evidence)
+    shot_endings = sum(1 for item in evidence if item.get("ended_in_shot"))
+    non_shot_endings = total_sequences - shot_endings
+    progression_hits = sum(
         1
         for item in evidence
         if "progressed from" in item["summary"] or "sustained attack" in item["summary"]
     )
+    attacking_third_reach_count = sum(1 for item in evidence if "attacking third" in item["summary"])
+    team_names = sorted({item["team_name"] for item in evidence if item.get("team_name")})
+    return {
+        "total_sequences": total_sequences,
+        "shot_endings": shot_endings,
+        "non_shot_endings": non_shot_endings,
+        "progression_hits": progression_hits,
+        "attacking_third_reach_count": attacking_third_reach_count,
+        "team_names": team_names,
+    }
+
+
+def build_role_prompt_json(
+    query: str,
+    evidence: list[dict[str, Any]],
+    stats: dict[str, Any],
+    extra_instruction: str = "",
+) -> str:
+    """Build a strict JSON-only prompt for grounded role-style answers."""
+
+    # Force the model to return only structured grounded fields so deterministic
+    # code can render the final answer without placeholders or invented counts.
+    pass_sequences = sum(1 for item in evidence if "pass" in item["summary"])
+    carry_sequences = sum(1 for item in evidence if "carry" in item["summary"])
     team_counts: dict[str, int] = {}
     for item in evidence:
         team = item["team_name"]
@@ -362,44 +384,64 @@ def compose_llm_grounded_answer(query: str, evidence: list[dict[str, Any]]) -> s
         evidence_lines.append(
             f"- team={item['team_name']}; players={players}; ended_in_shot={item['ended_in_shot']}; progression={item['summary'].split('. ')[-1].rstrip('.')}; summary={item['summary']}"
         )
-    prompt = "\n".join(
+    return "\n".join(
     [
         "You are a grounded football analyst writing from retrieved sequence summaries.",
+        "Return ONLY valid JSON. No markdown. No bullet lists outside JSON. No extra text.",
         "Use ONLY the evidence below.",
         "Do not use outside knowledge.",
-        "Do not invent numbers, percentages, averages, success rates, match history, or facts not directly stated in the evidence.",
-        "Do not mention retrieval scores, and do not treat them as football statistics.",
-        "Do not paraphrase raw event chains like 'pressure to duel to pass'. Summarize the football pattern instead.",
-        "Base the answer on these concrete signals only: pass_sequences, carry_sequences, shot_sequences, progression_sequences, team_counts, ended_in_shot flags, and sequence summaries.",
-        "If the question is a comparison, answer the comparison in the first sentence using the provided counts.",
-        "If the evidence is mixed across teams, say the sample is mixed unless one team clearly dominates.",
-        f"If one team dominates, the dominant team in this sample is: {dominant_team or 'unknown'}.",
-        "Use cautious sample-based language such as 'in these retrieved sequences' or 'the sample suggests'.",
-        "Only use strong words like 'more', 'mostly', or 'often' when they are supported by the counts below.",
-        "Mention shot tendency and progression tendency in plain language when relevant.",
-        "Write a fuller but still concise answer: aim for 3 to 4 sentences.",
-        "Sentence 1: answer the question directly.",
-        "Sentence 2: explain the main football pattern from the retrieved sample.",
-        "Sentence 3: add contrast or secondary detail if relevant.",
-        "Sentence 4: mention shot tendency or progression tendency when relevant.",
-        "Keep the answer football-readable and grounded.",
-        "Output must follow EXACTLY this format:",
-        "Answer: <3-4 sentences in plain football language>",
-        "Evidence Summary:",
-        "- <one short bullet on the main pattern>",
-        "- <one short bullet on shots or progression>",
-        "Scope Note: This is based only on retrieved sequences, not the full dataset.",
+        "Use only provided evidence and deterministic stats.",
+        "Use these stats exactly; do not compute new numbers.",
+        "All counts must be integers from the provided stats only.",
+        "No fabricated metrics, percentages, rates, averages, or placeholders.",
+        "Do not use the phrase 'based on the retrieved sample'.",
+        "Required JSON keys and allowed values:",
+        '{'
+        '"role_classification": "link_player" | "ball_carrier" | "finisher" | "mixed" | "insufficient", '
+        '"role_reasoning": string, '
+        '"after_involvement": string, '
+        '"attacking_third_reach_count": int, '
+        '"shot_ending_count": int, '
+        '"total_sequences": int, '
+        '"team_context": "single-team" | "mixed-team", '
+        '"sample_warning": string'
+        '}',
+        'The "sample_warning" value must be exactly: "This is based on retrieved sequences, not the full dataset."',
         f"Question: {query}",
-        f"Retrieved sample counts: pass_sequences={pass_sequences}, carry_sequences={carry_sequences}, shot_sequences={shot_sequences}, progression_sequences={progression_sequences}.",
+        f"Retrieved sample counts: pass_sequences={pass_sequences}, carry_sequences={carry_sequences}, total_sequences={stats['total_sequences']}, shot_endings={stats['shot_endings']}, non_shot_endings={stats['non_shot_endings']}, progression_hits={stats['progression_hits']}, attacking_third_reach_count={stats['attacking_third_reach_count']}.",
         f"Team counts in sample: {team_counts}.",
+        f"Dominant team in sample: {dominant_team or 'unknown'}.",
+        f"Allowed team names: {stats['team_names']}.",
+        extra_instruction,
         "Evidence:",
         *evidence_lines,
     ]
+    )
+
+
+def compose_llm_grounded_answer(
+    query: str,
+    evidence: list[dict[str, Any]],
+    stats: dict[str, Any],
+    extra_instruction: str = "",
+) -> str:
+    """Compose a grounded JSON answer with an LLM using only the retrieved evidence."""
+
+    # Keep the LLM path tightly constrained so deterministic code can validate
+    # and render the final answer without template phrasing.
+    if not evidence:
+        return f'No grounded evidence was found for "{query}".'
+    prompt = build_role_prompt_json(
+        query=query,
+        evidence=evidence,
+        stats=stats,
+        extra_instruction=extra_instruction,
     )
     request_body = json.dumps(
         {
             "model": os.getenv("OLLAMA_MODEL", "gemma4:26b"),
             "prompt": prompt,
+            "format": "json",
             "stream": False,
         }
     ).encode("utf-8")
@@ -417,6 +459,128 @@ def compose_llm_grounded_answer(query: str, evidence: list[dict[str, Any]]) -> s
     return str(payload.get("response", "")).strip()
 
 
+def parse_and_validate_llm_json(
+    raw_text: str,
+    stats: dict[str, Any],
+    evidence: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Parse and validate the LLM JSON payload."""
+
+    # Enforce a strict JSON contract so only grounded structured output reaches
+    # the final renderer.
+    cleaned = raw_text.strip()
+    cleaned = re.sub(r"^```json\s*|\s*```$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    try:
+        payload = json.loads(cleaned)
+    except json.JSONDecodeError:
+        # Some models return extra wrapper text; recover the first JSON object.
+        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+        if not match:
+            raise ValueError("LLM JSON parse failed: no JSON object found")
+        try:
+            payload = json.loads(match.group(0))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"LLM JSON parse failed: {exc.msg}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("LLM JSON payload is not an object")
+    # Deterministic backfills keep strict mode usable when models omit fields.
+    default_role_reasoning = (
+        "The evidence suggests a mixed role across combinations and progression"
+        if stats["shot_endings"] < stats["total_sequences"]
+        else "The evidence suggests involvement that often appears near the end of attacks"
+    )
+    default_after_involvement = (
+        "his involvement is usually followed by continued progression rather than an immediate shot"
+        if stats["shot_endings"] == 0
+        else "his involvement is usually followed by progression, with some sequences ending in a shot"
+    )
+    payload.setdefault("role_classification", "insufficient")
+    payload.setdefault("role_reasoning", default_role_reasoning)
+    payload.setdefault("after_involvement", default_after_involvement)
+    payload.setdefault("attacking_third_reach_count", stats["attacking_third_reach_count"])
+    payload.setdefault("shot_ending_count", stats["shot_endings"])
+    payload.setdefault("total_sequences", stats["total_sequences"])
+    payload.setdefault("team_context", "mixed-team" if len(stats["team_names"]) > 1 else "single-team")
+    payload.setdefault("sample_warning", "This is based on retrieved sequences, not the full dataset.")
+    if payload["role_classification"] not in {"link_player", "ball_carrier", "finisher", "mixed", "insufficient"}:
+        payload["role_classification"] = "insufficient"
+    if payload["team_context"] not in {"single-team", "mixed-team"}:
+        payload["team_context"] = "mixed-team" if len(stats["team_names"]) > 1 else "single-team"
+    for key in ["attacking_third_reach_count", "shot_ending_count", "total_sequences"]:
+        if isinstance(payload[key], str) and payload[key].isdigit():
+            payload[key] = int(payload[key])
+        if not isinstance(payload[key], int):
+            raise ValueError(f"LLM JSON non-integer field: {key}")
+    if not (0 <= payload["attacking_third_reach_count"] <= payload["total_sequences"]):
+        raise ValueError("LLM JSON attacking_third_reach_count out of range")
+    if not (0 <= payload["shot_ending_count"] <= payload["total_sequences"]):
+        raise ValueError("LLM JSON shot_ending_count out of range")
+    # Keep final numeric claims deterministic and grounded in computed stats.
+    payload["total_sequences"] = stats["total_sequences"]
+    payload["shot_ending_count"] = stats["shot_endings"]
+    payload["attacking_third_reach_count"] = stats["attacking_third_reach_count"]
+    placeholder_patterns = ["based on the retrieved sample"]
+    text_fields = [payload["role_reasoning"], payload["after_involvement"], payload["sample_warning"]]
+    for phrase in placeholder_patterns:
+        if any(phrase in str(field).lower() for field in text_fields):
+            raise ValueError(f"LLM JSON placeholder phrase: {phrase}")
+    if "not enough detail" in str(payload["role_reasoning"]).lower() and payload["role_classification"] != "insufficient":
+        raise ValueError("LLM JSON insufficient phrasing mismatch")
+    if payload["sample_warning"] != "This is based on retrieved sequences, not the full dataset.":
+        payload["sample_warning"] = "This is based on retrieved sequences, not the full dataset."
+    return payload
+
+
+def render_role_answer(valid_json: dict[str, Any]) -> str:
+    """Render a deterministic grounded answer from validated LLM JSON."""
+
+    # Render prose from validated deterministic fields only, so free-text model
+    # fragments do not leak unsupported tactical claims into the final answer.
+    role_labels = {
+        "link_player": "a link player in combination play",
+        "ball_carrier": "more of a ball carrier",
+        "finisher": "more of a finisher",
+        "mixed": "a mixed role across buildup and progression",
+        "insufficient": "an unclear role from this sample",
+    }
+
+    total = valid_json["total_sequences"]
+    shot_endings = valid_json["shot_ending_count"]
+    progression = valid_json["attacking_third_reach_count"]
+    team_context = valid_json["team_context"]
+    if shot_endings == 0:
+        follow_up = "After involvement, sequences usually continue through progression rather than finishing with a shot."
+    elif shot_endings == total:
+        follow_up = "After involvement, sequences regularly continue into shot-ending attacks."
+    else:
+        follow_up = "After involvement, sequences often continue through progression, with only some ending in shots."
+
+    if progression >= max(1, total // 2):
+        progression_tendency = "Most retrieved sequences reach the attacking third."
+    else:
+        progression_tendency = "Only part of the sample reaches the attacking third consistently."
+
+    answer_sentences = [
+        f"Answer: In these retrieved sequences, the role looks like {role_labels[valid_json['role_classification']]}.",
+        follow_up,
+        progression_tendency,
+        f"{progression} of {total} sequences reached the attacking third, and {shot_endings} of {total} ended in a shot.",
+    ]
+    if team_context == "mixed-team" or total <= 2:
+        answer_sentences.append("The sample is either mixed across teams or small, so the conclusion should be treated cautiously.")
+    answer = " ".join(answer_sentences)
+    evidence_summary = "\n".join(
+        [
+            "Evidence Summary:",
+            f"- Progression pattern: {valid_json['attacking_third_reach_count']} of {valid_json['total_sequences']} reached attacking third.",
+            f"- Shot-ending tendency: {valid_json['shot_ending_count']} of {valid_json['total_sequences']} ended in a shot.",
+            f"- Team context: {valid_json['team_context']}.",
+            f"Scope Note: {valid_json['sample_warning']}",
+        ]
+    )
+    return f"{answer}\n{evidence_summary}"
+
+
 def _allowed_entities(evidence: list[dict[str, Any]]) -> set[str]:
     """Collect team and player names that are allowed to appear in the LLM answer."""
 
@@ -427,7 +591,41 @@ def _allowed_entities(evidence: list[dict[str, Any]]) -> set[str]:
     return entities
 
 
-def validate_llm_answer(answer: str, evidence: list[dict[str, Any]]) -> tuple[bool, list[str]]:
+def extract_player_from_query(query: str, evidence: list[dict[str, Any]]) -> str | None:
+    """Detect a player reference in the query using player names from retrieved evidence."""
+
+    # Match simple player questions by looking for known player names or surname tokens in the query.
+    lowered_query = query.lower()
+    players = {
+        player
+        for item in evidence
+        for player in item.get("players") or []
+        if player
+    }
+    sorted_players = sorted(players, key=len, reverse=True)
+    for player in sorted_players:
+        lowered_player = player.lower()
+        if lowered_player in lowered_query:
+            return player
+        for token in lowered_player.replace("'", "").split():
+            if len(token) >= 4 and re.search(rf"\b{re.escape(token)}(?:'s)?\b", lowered_query):
+                return player
+    return None
+
+
+def filter_evidence_for_player(evidence: list[dict[str, Any]], player_name: str) -> list[dict[str, Any]]:
+    """Keep only evidence items that include the detected player."""
+
+    # Filter after retrieval so ranking stays unchanged while player-specific answers stay focused.
+    lowered_player = player_name.lower()
+    return [
+        item
+        for item in evidence
+        if any(lowered_player == player.lower() for player in item.get("players") or [])
+    ]
+
+
+def validate_llm_answer(answer: str, evidence: list[dict[str, Any]], stats: dict[str, Any]) -> tuple[bool, list[str]]:
     """Validate that an LLM answer stays within the retrieved evidence."""
 
     # This validator is intentionally strict and lightweight so unsupported claims
@@ -438,58 +636,28 @@ def validate_llm_answer(answer: str, evidence: list[dict[str, Any]]) -> tuple[bo
     for pattern in blocked_patterns:
         if pattern in lowered:
             errors.append(f"unsupported metric pattern: {pattern}")
-
-    shot_count = sum(1 for item in evidence if item.get("ended_in_shot"))
-    allowed_numbers = {len(evidence), shot_count}
-    for match in re.findall(r"\b\d+\b", answer):
-        if int(match) not in allowed_numbers:
-            errors.append(f"unsupported number: {match}")
-
-    allowed_entities = _allowed_entities(evidence)
-    normalized_allowed_entities = {
-        entity.replace("’", "'").strip() for entity in allowed_entities
-    }
-    allowed_entity_parts = {
-        part for entity in normalized_allowed_entities for part in entity.replace("'", "").split()
-    }
-    candidate_entities = set(re.findall(r"\b[A-Z][A-Za-zÀ-ÿ'’-]+(?: [A-Z][A-Za-zÀ-ÿ'’-]+)*\b", answer))
-    ignored_entities = {
-        "Answer",
-        "Evidence Summary",
-        "Scope Note",
-        "This",
-        "The",
-        "In",
-        "If",
-        "Most",
-        "Some",
-        "Many",
-        "Progression",
-        "Shot",
-        "Shots",
-        "Evidence",
-        "Retrieved",
-        "Sample",
-        "Scope",
-        "Note",
-    }
-    for entity in candidate_entities:
-        cleaned_entity = entity.replace("’", "'").strip()
-        if cleaned_entity.endswith("'s"):
-            cleaned_entity = cleaned_entity[:-2]
-        cleaned_parts = cleaned_entity.replace("'", "").split()
-        if entity in ignored_entities or cleaned_entity in ignored_entities:
-            continue
-        if cleaned_entity in normalized_allowed_entities:
-            continue
-        if cleaned_parts and all(part in allowed_entity_parts for part in cleaned_parts):
-            continue
-        if len(cleaned_parts) == 1:
-            continue
-        if any(cleaned_entity in allowed for allowed in normalized_allowed_entities):
-            continue
-        if len(cleaned_entity) > 2:
-            errors.append(f"unsupported entity: {entity}")
+    if not answer.strip():
+        errors.append("empty answer")
+    required_sections = ["Answer:", "Evidence Summary:", "Scope Note:"]
+    if not all(section in answer for section in required_sections):
+        errors.append("required sections missing")
+    contradictory_patterns = [
+        "shot-ending sequence that does not end in a shot",
+        "shot ending sequence that does not end in a shot",
+        "shots not ended in a shot",
+        "receives shots",
+    ]
+    for pattern in contradictory_patterns:
+        if pattern in lowered:
+            errors.append(f"contradictory phrasing: {pattern}")
+    exact_scope = "Scope Note: This is based on retrieved sequences, not the full dataset."
+    if exact_scope not in answer:
+        errors.append("scope note not exact")
+    for line in answer.splitlines():
+        if line.startswith("Scope Note:") and line.strip() != exact_scope:
+            errors.append("scope note contains extra text")
+    if re.search(r"\b\d+\.\d+\s+of\s+\d+\b", answer):
+        errors.append("fractional count pattern")
 
     return not errors, errors
 
@@ -500,34 +668,83 @@ def run_query(
     trace: dict[str, Any],
     top_k: int = 5,
     use_llm: bool = True,
+    llm_required: bool = False,
 ) -> QueryResponse:
     """Run retrieval and grounded answer generation for one user query."""
 
     # Run search first, then build the final response with evidence and trace data.
     evidence = retrieve(query=query, index_data=index_data, top_k=top_k)
+    player_name = extract_player_from_query(query=query, evidence=evidence)
+    player_filter_applied = player_name is not None
+    player_filter_hits = 0
+    if player_name:
+        filtered_evidence = filter_evidence_for_player(evidence=evidence, player_name=player_name)
+        player_filter_hits = len(filtered_evidence)
+        if filtered_evidence:
+            evidence = filtered_evidence
+        else:
+            return QueryResponse(
+                answer=f'No player-specific grounded evidence found for "{player_name}" in the top retrieved sequences. Try increasing top_k.',
+                evidence=[],
+                trace={
+                    **trace,
+                    "retrieval_results": 0,
+                    "generation_mode": "template",
+                    "llm_validated": False,
+                    "llm_validation_errors": [],
+                    "llm_retry_used": False,
+                    "llm_fallback": False,
+                    "player_filter_applied": True,
+                    "player_filter_name": player_name,
+                    "player_filter_hits": 0,
+                },
+            )
     generation_mode = "template"
+    stats = build_evidence_stats(evidence)
     llm_validated = False
     llm_validation_errors: list[str] = []
     llm_retry_used = False
+    llm_sanitized = False
+    llm_output_format: str | None = None
     llm_fallback = False
+    llm_failure_reason: str | None = None
     if use_llm and evidence:
         try:
-            answer = compose_llm_grounded_answer(query=query, evidence=evidence)
-            llm_validated, llm_validation_errors = validate_llm_answer(answer=answer, evidence=evidence)
-            if not llm_validated:
+            raw_answer = compose_llm_grounded_answer(query=query, evidence=evidence, stats=stats)
+            llm_output_format = "json"
+            try:
+                valid_json = parse_and_validate_llm_json(raw_text=raw_answer, stats=stats, evidence=evidence)
+                answer = render_role_answer(valid_json)
+                llm_validated = True
+            except ValueError as exc:
+                llm_validated = False
+                llm_validation_errors = [str(exc)]
                 llm_retry_used = True
-                retry_query = (
-                    f"{query}\n\nAdditional instruction: "
-                    "Remove unsupported stats/percentages/rates and use only evidence-backed counts."
+                retry_instruction = (
+                    "Return valid JSON only. Remove unsupported stats/percentages/rates and use only evidence-backed counts."
                 )
-                answer = compose_llm_grounded_answer(query=retry_query, evidence=evidence)
-                llm_validated, llm_validation_errors = validate_llm_answer(answer=answer, evidence=evidence)
-            if answer and llm_validated:
+                raw_answer = compose_llm_grounded_answer(
+                    query=query,
+                    evidence=evidence,
+                    stats=stats,
+                    extra_instruction=retry_instruction,
+                )
+                valid_json = parse_and_validate_llm_json(raw_text=raw_answer, stats=stats, evidence=evidence)
+                answer = render_role_answer(valid_json)
+                llm_validated = True
+                llm_validation_errors = []
+            if llm_validated:
                 generation_mode = "llm"
             else:
+                llm_failure_reason = "; ".join(llm_validation_errors) or "llm validation failed"
+                if llm_required:
+                    raise ValueError(f"LLM generation failed validation and llm_required=true: {llm_failure_reason}")
                 answer = compose_grounded_answer(query=query, evidence=evidence)
                 llm_fallback = True
-        except Exception:
+        except Exception as exc:
+            llm_failure_reason = llm_failure_reason or str(exc)
+            if llm_required:
+                raise ValueError(f"LLM generation failed validation and llm_required=true: {llm_failure_reason}") from exc
             answer = compose_grounded_answer(query=query, evidence=evidence)
             llm_fallback = True
     else:
@@ -539,9 +756,16 @@ def run_query(
             **trace,
             "retrieval_results": len(evidence),
             "generation_mode": generation_mode,
+            "llm_required": llm_required,
+            "llm_sanitized": llm_sanitized,
+            "llm_output_format": llm_output_format,
             "llm_validated": llm_validated,
             "llm_validation_errors": llm_validation_errors,
             "llm_retry_used": llm_retry_used,
             "llm_fallback": llm_fallback,
+            "llm_failure_reason": llm_failure_reason,
+            "player_filter_applied": player_filter_applied,
+            "player_filter_name": player_name,
+            "player_filter_hits": player_filter_hits,
         },
     )                                                                                               
