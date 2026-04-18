@@ -97,6 +97,7 @@ def home() -> str:
       <textarea id="queryText" style="width: 100%; min-height: 100px; padding: 8px;" placeholder="How does this team create chances?"></textarea>
       <p><button onclick="runQuery()">Run Query</button></p>
       <h2>Answer</h2>
+      <pre id="answerSource" style="white-space: pre-wrap; background: #f5f5f5; padding: 12px;"></pre>
       <pre id="answer" style="white-space: pre-wrap; background: #f5f5f5; padding: 12px;"></pre>
       <h2>Evidence</h2>
       <pre id="evidence" style="white-space: pre-wrap; background: #f5f5f5; padding: 12px;"></pre>
@@ -107,15 +108,22 @@ def home() -> str:
           const res = await fetch('/query', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({query: document.getElementById('queryText').value})
+            body: JSON.stringify({query: document.getElementById('queryText').value, use_llm: true})
           });
           const data = await res.json();
           render(data);
         }
         function render(data) {
+          const trace = data.trace || {};
+          const source = trace.generation_mode === 'llm' && !trace.llm_fallback
+            ? 'Answer source: Ollama'
+            : trace.llm_fallback
+              ? 'Answer source: Template fallback'
+              : 'Answer source: Template';
+          document.getElementById('answerSource').textContent = source;
           document.getElementById('answer').textContent = data.answer || data.detail || '';
           document.getElementById('evidence').textContent = JSON.stringify(data.evidence || data, null, 2);
-          document.getElementById('trace').textContent = JSON.stringify(data.trace || {}, null, 2);
+          document.getElementById('trace').textContent = JSON.stringify(trace, null, 2);
         }
       </script>
     </body>
@@ -180,6 +188,7 @@ def query(request: QueryRequest) -> dict[str, Any]:
             index_data=STATE["index"],
             trace=STATE["trace"],
             top_k=request.top_k,
+            use_llm=request.use_llm,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

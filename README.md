@@ -28,6 +28,69 @@ conda activate local-soccer-copilot
 pip install -r requirements.txt
 ```
 
+## Optional LLM Mode (Ollama + Gemma 4)
+
+The app can use a local Ollama model for answer writing while keeping TF-IDF retrieval and evidence formatting unchanged.
+
+### 1. Install Ollama
+
+On Linux, install Ollama with:
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+Start Ollama:
+
+```bash
+ollama serve
+```
+
+### 2. Download a Local Model
+
+Pull Gemma 4 locally:
+
+```bash
+ollama pull gemma4:26b
+```
+
+You can also test the model directly from the terminal:
+
+```bash
+ollama run gemma4:26b
+```
+
+### 3. Set the Model Name for the App
+
+In the terminal where you run FastAPI:
+
+```bash
+export OLLAMA_MODEL=gemma4:26b
+```
+
+Optional custom Ollama URL:
+
+```bash
+export OLLAMA_URL=http://127.0.0.1:11434
+```
+
+### 4. Use the Local LLM
+
+The LLM path is optional. Send `use_llm: true` when you want Gemma 4 to rewrite the grounded answer from the retrieved evidence.
+
+Example `POST /query` body:
+
+```json
+{
+  "query": "How does this team create chances?",
+  "top_k": 5,
+  "use_llm": true
+}
+```
+
+If Ollama is not running or the model is unavailable, the app falls back to the template answer automatically.
+The answers remain grounded in the retrieved evidence; the LLM only improves phrasing.
+
 ## Download Local StatsBomb Data
 
 Create the local data folder and download one sample StatsBomb event file:
@@ -76,6 +139,8 @@ When you click `Run Query`, the app automatically:
 - retrieves evidence
 - returns a grounded answer
 
+The built-in page works with the template answer path by default. Use the API request above when you want Ollama-based phrasing.
+
 ## API
 
 ### `POST /ingest`
@@ -111,6 +176,16 @@ Response fields:
 
 The `/query` route automatically loads the local dataset and builds the index if they are not already ready.
 
+Example with optional Ollama generation:
+
+```json
+{
+  "query": "How does this team create chances?",
+  "top_k": 5,
+  "use_llm": true
+}
+```
+
 ## Example Questions
 
 - `How does this team create chances?`
@@ -128,4 +203,5 @@ One simple sample question to try first:
 
 - Retrieval works without any generation model.
 - Answers are grounded only in retrieved evidence.
+- Optional LLM generation uses a local Ollama model and falls back to the template answer on failure.
 - Phase 1 is event-data only and keeps everything in memory for simplicity.

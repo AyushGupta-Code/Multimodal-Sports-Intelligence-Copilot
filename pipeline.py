@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -284,40 +288,260 @@ def compose_grounded_answer(query: str, evidence: list[dict[str, Any]]) -> str:
     if not evidence:
         return f'No grounded evidence was found for "{query}".'
     teams = sorted({item["team_name"] for item in evidence if item.get("team_name")})
-    players = []
+    player_counts: dict[str, int] = {}
     for item in evidence:
-        players.extend(item.get("players") or [])
-    unique_players = list(dict.fromkeys(players))
+        for player in item.get("players") or []:
+            player_counts[player] = player_counts.get(player, 0) + 1
+    top_players = sorted(player_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
     shot_count = sum(1 for item in evidence if item.get("ended_in_shot"))
-    progression_hits = [
-        item["summary"]
+    progression_count = sum(
+        1
         for item in evidence
         if "progressed from" in item["summary"] or "sustained attack" in item["summary"]
-    ]
-    answer_parts = [
-        f'The answer is grounded in {len(evidence)} retrieved sequences for "{query}".',
-        f"Teams in evidence: {', '.join(teams) if teams else 'unknown'}.",
-        f"Common players involved: {', '.join(unique_players[:6]) if unique_players else 'not clear from evidence'}.",
-        f"{shot_count} of the retrieved sequences ended in a shot.",
-        "The evidence most often shows forward progression."
-        if progression_hits
-        else "The evidence does not show a strong progression pattern.",
-    ]
-    return " ".join(answer_parts)
+    )
+    pass_count = sum(
+        1 for item in evidence if "pass" in item["summary"] or "combination" in item["summary"]
+    )
+    dribble_count = sum(1 for item in evidence if "carry" in item["summary"])
+
+    if shot_count >= max(1, len(evidence) // 2):
+        pattern_text = "The retrieved attacks mostly build toward shots."
+    elif pass_count >= max(1, len(evidence) // 2):
+        pattern_text = "The retrieved attacks are mostly built through passing combinations."
+    elif dribble_count >= max(1, len(evidence) // 2):
+        pattern_text = "The retrieved attacks often include carries to move the ball forward."
+    else:
+        pattern_text = "The retrieved attacks show a mix of short combinations and forward moves."
+
+    if shot_count == 0:
+        shot_text = "None of the retrieved sequences end in a shot."
+    elif shot_count == 1:
+        shot_text = "Only 1 of the retrieved sequences ends in a shot."
+    else:
+        shot_text = f"{shot_count} of the {len(evidence)} retrieved sequences end in a shot."
+
+    if progression_count >= max(1, len(evidence) // 2):
+        progression_text = "Most of the evidence shows the ball being worked forward into attacking areas."
+    elif progression_count > 0:
+        progression_text = "Some of the evidence shows forward progression, but it is not consistent across every sequence."
+    else:
+        progression_text = "The evidence does not show a strong forward-progression pattern."
+
+    if top_players:
+        player_names = ", ".join(name for name, _ in top_players)
+        player_text = f"The most visible players in these sequences are {player_names}."
+    else:
+        player_text = "The key players are not clear from the retrieved evidence."
+
+    team_text = f"The evidence comes from {', '.join(teams)}." if teams else "The team is not clear from the retrieved evidence."
+    return " ".join([pattern_text, shot_text, progression_text, player_text, team_text])
 
 
-def run_query(query: str, index_data: dict[str, Any], trace: dict[str, Any], top_k: int = 5) -> QueryResponse:
+def compose_llm_grounded_answer(query: str, evidence: list[dict[str, Any]]) -> str:
+    """Compose a grounded answer with an LLM using only the retrieved evidence."""
+
+    # Keep the LLM path tightly constrained so it only rewrites the retrieved evidence into readable football language.
+    if not evidence:
+        return f'No grounded evidence was found for "{query}".'
+    pass_sequences = sum(1 for item in evidence if "pass" in item["summary"])
+    carry_sequences = sum(1 for item in evidence if "carry" in item["summary"])
+    shot_sequences = sum(1 for item in evidence if item.get("ended_in_shot"))
+    progression_sequences = sum(
+        1
+        for item in evidence
+        if "progressed from" in item["summary"] or "sustained attack" in item["summary"]
+    )
+    team_counts: dict[str, int] = {}
+    for item in evidence:
+        team = item["team_name"]
+        team_counts[team] = team_counts.get(team, 0) + 1
+    dominant_team = max(team_counts, key=team_counts.get) if team_counts else None
+    evidence_lines = []
+    for item in evidence:
+        players = ", ".join((item.get("players") or [])[:3]) or "unknown"
+        evidence_lines.append(
+            f"- team={item['team_name']}; players={players}; ended_in_shot={item['ended_in_shot']}; progression={item['summary'].split('. ')[-1].rstrip('.')}; summary={item['summary']}"
+        )
+    prompt = "\n".join(
+    [
+        "You are a grounded football analyst writing from retrieved sequence summaries.",
+        "Use ONLY the evidence below.",
+        "Do not use outside knowledge.",
+        "Do not invent numbers, percentages, averages, success rates, match history, or facts not directly stated in the evidence.",
+        "Do not mention retrieval scores, and do not treat them as football statistics.",
+        "Do not paraphrase raw event chains like 'pressure to duel to pass'. Summarize the football pattern instead.",
+        "Base the answer on these concrete signals only: pass_sequences, carry_sequences, shot_sequences, progression_sequences, team_counts, ended_in_shot flags, and sequence summaries.",
+        "If the question is a comparison, answer the comparison in the first sentence using the provided counts.",
+        "If the evidence is mixed across teams, say the sample is mixed unless one team clearly dominates.",
+        f"If one team dominates, the dominant team in this sample is: {dominant_team or 'unknown'}.",
+        "Use cautious sample-based language such as 'in these retrieved sequences' or 'the sample suggests'.",
+        "Only use strong words like 'more', 'mostly', or 'often' when they are supported by the counts below.",
+        "Mention shot tendency and progression tendency in plain language when relevant.",
+        "Write a fuller but still concise answer: aim for 3 to 4 sentences.",
+        "Sentence 1: answer the question directly.",
+        "Sentence 2: explain the main football pattern from the retrieved sample.",
+        "Sentence 3: add contrast or secondary detail if relevant.",
+        "Sentence 4: mention shot tendency or progression tendency when relevant.",
+        "Keep the answer football-readable and grounded.",
+        "Output must follow EXACTLY this format:",
+        "Answer: <3-4 sentences in plain football language>",
+        "Evidence Summary:",
+        "- <one short bullet on the main pattern>",
+        "- <one short bullet on shots or progression>",
+        "Scope Note: This is based only on retrieved sequences, not the full dataset.",
+        f"Question: {query}",
+        f"Retrieved sample counts: pass_sequences={pass_sequences}, carry_sequences={carry_sequences}, shot_sequences={shot_sequences}, progression_sequences={progression_sequences}.",
+        f"Team counts in sample: {team_counts}.",
+        "Evidence:",
+        *evidence_lines,
+    ]
+    )
+    request_body = json.dumps(
+        {
+            "model": os.getenv("OLLAMA_MODEL", "gemma4:26b"),
+            "prompt": prompt,
+            "stream": False,
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        url=f"{os.getenv('OLLAMA_URL', 'http://127.0.0.1:11434').rstrip('/')}/api/generate",
+        data=request_body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.URLError as exc:
+        raise ValueError("Ollama is not available") from exc
+    return str(payload.get("response", "")).strip()
+
+
+def _allowed_entities(evidence: list[dict[str, Any]]) -> set[str]:
+    """Collect team and player names that are allowed to appear in the LLM answer."""
+
+    # Limit entity references to names that actually appear in the retrieved evidence.
+    entities = {item["team_name"] for item in evidence if item.get("team_name")}
+    for item in evidence:
+        entities.update(player for player in item.get("players") or [] if player)
+    return entities
+
+
+def validate_llm_answer(answer: str, evidence: list[dict[str, Any]]) -> tuple[bool, list[str]]:
+    """Validate that an LLM answer stays within the retrieved evidence."""
+
+    # This validator is intentionally strict and lightweight so unsupported claims
+    # fall back to the safer template answer.
+    lowered = answer.lower()
+    errors: list[str] = []
+    blocked_patterns = ["%", "per minute", "xg", "average", "averaged", "last games"]
+    for pattern in blocked_patterns:
+        if pattern in lowered:
+            errors.append(f"unsupported metric pattern: {pattern}")
+
+    shot_count = sum(1 for item in evidence if item.get("ended_in_shot"))
+    allowed_numbers = {len(evidence), shot_count}
+    for match in re.findall(r"\b\d+\b", answer):
+        if int(match) not in allowed_numbers:
+            errors.append(f"unsupported number: {match}")
+
+    allowed_entities = _allowed_entities(evidence)
+    normalized_allowed_entities = {
+        entity.replace("’", "'").strip() for entity in allowed_entities
+    }
+    allowed_entity_parts = {
+        part for entity in normalized_allowed_entities for part in entity.replace("'", "").split()
+    }
+    candidate_entities = set(re.findall(r"\b[A-Z][A-Za-zÀ-ÿ'’-]+(?: [A-Z][A-Za-zÀ-ÿ'’-]+)*\b", answer))
+    ignored_entities = {
+        "Answer",
+        "Evidence Summary",
+        "Scope Note",
+        "This",
+        "The",
+        "In",
+        "If",
+        "Most",
+        "Some",
+        "Many",
+        "Progression",
+        "Shot",
+        "Shots",
+        "Evidence",
+        "Retrieved",
+        "Sample",
+        "Scope",
+        "Note",
+    }
+    for entity in candidate_entities:
+        cleaned_entity = entity.replace("’", "'").strip()
+        if cleaned_entity.endswith("'s"):
+            cleaned_entity = cleaned_entity[:-2]
+        cleaned_parts = cleaned_entity.replace("'", "").split()
+        if entity in ignored_entities or cleaned_entity in ignored_entities:
+            continue
+        if cleaned_entity in normalized_allowed_entities:
+            continue
+        if cleaned_parts and all(part in allowed_entity_parts for part in cleaned_parts):
+            continue
+        if len(cleaned_parts) == 1:
+            continue
+        if any(cleaned_entity in allowed for allowed in normalized_allowed_entities):
+            continue
+        if len(cleaned_entity) > 2:
+            errors.append(f"unsupported entity: {entity}")
+
+    return not errors, errors
+
+
+def run_query(
+    query: str,
+    index_data: dict[str, Any],
+    trace: dict[str, Any],
+    top_k: int = 5,
+    use_llm: bool = True,
+) -> QueryResponse:
     """Run retrieval and grounded answer generation for one user query."""
 
     # Run search first, then build the final response with evidence and trace data.
     evidence = retrieve(query=query, index_data=index_data, top_k=top_k)
-    answer = compose_grounded_answer(query=query, evidence=evidence)
+    generation_mode = "template"
+    llm_validated = False
+    llm_validation_errors: list[str] = []
+    llm_retry_used = False
+    llm_fallback = False
+    if use_llm and evidence:
+        try:
+            answer = compose_llm_grounded_answer(query=query, evidence=evidence)
+            llm_validated, llm_validation_errors = validate_llm_answer(answer=answer, evidence=evidence)
+            if not llm_validated:
+                llm_retry_used = True
+                retry_query = (
+                    f"{query}\n\nAdditional instruction: "
+                    "Remove unsupported stats/percentages/rates and use only evidence-backed counts."
+                )
+                answer = compose_llm_grounded_answer(query=retry_query, evidence=evidence)
+                llm_validated, llm_validation_errors = validate_llm_answer(answer=answer, evidence=evidence)
+            if answer and llm_validated:
+                generation_mode = "llm"
+            else:
+                answer = compose_grounded_answer(query=query, evidence=evidence)
+                llm_fallback = True
+        except Exception:
+            answer = compose_grounded_answer(query=query, evidence=evidence)
+            llm_fallback = True
+    else:
+        answer = compose_grounded_answer(query=query, evidence=evidence)
     return QueryResponse(
         answer=answer,
         evidence=evidence,
         trace={
             **trace,
             "retrieval_results": len(evidence),
-            "generation_mode": "template",
+            "generation_mode": generation_mode,
+            "llm_validated": llm_validated,
+            "llm_validation_errors": llm_validation_errors,
+            "llm_retry_used": llm_retry_used,
+            "llm_fallback": llm_fallback,
         },
-    )
+    )                                                                                               

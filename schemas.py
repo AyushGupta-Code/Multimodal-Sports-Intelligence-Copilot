@@ -46,6 +46,7 @@ class QueryRequest(BaseModel):
 
     query: str
     top_k: int = 5
+    use_llm: bool = True
 
 
 class QueryResponse(BaseModel):
