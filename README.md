@@ -10,7 +10,7 @@ Minimal local-first MVP for ingesting StatsBomb-style soccer event JSON, convert
 - Builds deterministic sequence summaries for retrieval.
 - Uses an in-memory TF-IDF index for local search.
 - Automatically ingests data and builds the index when you run a query in the UI.
-- Returns grounded answers with evidence snippets and trace metadata.
+- Returns grounded, intent-aware answers with in-depth evidence analysis and trace metadata.
 
 ## Dependencies
 

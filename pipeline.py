@@ -287,54 +287,167 @@ def compose_grounded_answer(query: str, evidence: list[dict[str, Any]]) -> str:
     # Build a careful answer that only refers to what appears in the retrieved evidence.
     if not evidence:
         return f'No grounded evidence was found for "{query}".'
-    teams = sorted({item["team_name"] for item in evidence if item.get("team_name")})
+    stats = build_evidence_stats(evidence)
+    analysis = _build_analysis_bundle(query=query, evidence=evidence, stats=stats)
+    return _render_analysis_answer(analysis=analysis)
+
+
+def _build_analysis_bundle(
+    query: str, evidence: list[dict[str, Any]], stats: dict[str, Any]
+) -> dict[str, Any]:
+    """Build reusable evidence analysis for intent-aware deterministic answers."""
+
+    # Compute a compact tactical bundle that all answer styles can reuse.
+    lowered_query = query.strip().lower()
+    teams = stats["team_names"]
     player_counts: dict[str, int] = {}
     for item in evidence:
         for player in item.get("players") or []:
             player_counts[player] = player_counts.get(player, 0) + 1
-    top_players = sorted(player_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
-    shot_count = sum(1 for item in evidence if item.get("ended_in_shot"))
-    progression_count = sum(
-        1
-        for item in evidence
-        if "progressed from" in item["summary"] or "sustained attack" in item["summary"]
+    top_players = sorted(player_counts.items(), key=lambda item: (-item[1], item[0]))[:5]
+    progression_count = stats["progression_hits"]
+    pass_count = sum(1 for item in evidence if "pass" in item["summary"] or "combination" in item["summary"])
+    carry_count = sum(1 for item in evidence if "carry" in item["summary"])
+    attacking_third_count = stats["attacking_third_reach_count"]
+    evidence_snapshots = [item["summary"] for item in evidence[:3]]
+    team_counts: dict[str, int] = {}
+    for item in evidence:
+        team_name = item.get("team_name")
+        if team_name:
+            team_counts[team_name] = team_counts.get(team_name, 0) + 1
+    dominant_team = max(team_counts, key=team_counts.get) if team_counts else None
+    dominant_team_count = team_counts.get(dominant_team, 0) if dominant_team else 0
+    question_profile = _question_profile(lowered_query)
+
+    majority_threshold = stats["total_sequences"] / 2
+    if stats["shot_endings"] > majority_threshold:
+        tactical_pattern = "shot-leaning attacks"
+    elif pass_count > majority_threshold:
+        tactical_pattern = "pass-combination attacks"
+    elif carry_count > majority_threshold:
+        tactical_pattern = "carry-led attacks"
+    else:
+        tactical_pattern = "mixed attacking patterns"
+
+    direct_answer = _direct_answer_from_profile(
+        profile=question_profile,
+        stats=stats,
+        dominant_team=dominant_team,
+        dominant_team_count=dominant_team_count,
+        top_players=top_players,
+        tactical_pattern=tactical_pattern,
     )
-    pass_count = sum(
-        1 for item in evidence if "pass" in item["summary"] or "combination" in item["summary"]
+
+    return {
+        "direct_answer": direct_answer,
+        "tactical_pattern": tactical_pattern,
+        "total_sequences": stats["total_sequences"],
+        "shot_endings": stats["shot_endings"],
+        "progression_count": progression_count,
+        "attacking_third_count": attacking_third_count,
+        "pass_count": pass_count,
+        "carry_count": carry_count,
+        "top_players": top_players,
+        "teams": teams,
+        "dominant_team": dominant_team,
+        "dominant_team_count": dominant_team_count,
+        "question_profile": question_profile,
+        "evidence_snapshots": evidence_snapshots,
+    }
+
+
+def _render_analysis_answer(analysis: dict[str, Any]) -> str:
+    """Render an in-depth deterministic answer from the analysis bundle."""
+
+    # Keep a stable answer structure so broad question types still receive
+    # precise grounded numbers plus tactical context.
+    total_sequences = analysis["total_sequences"]
+    if total_sequences <= 0:
+        return "No grounded evidence available."
+    top_players = analysis["top_players"]
+    teams = analysis["teams"]
+    player_line = (
+        ", ".join(f"{name} ({count})" for name, count in top_players[:3])
+        if top_players
+        else "No clear player concentration."
     )
-    dribble_count = sum(1 for item in evidence if "carry" in item["summary"])
+    team_line = ", ".join(teams) if teams else "Unknown teams in this sample."
+    evidence_lines = analysis["evidence_snapshots"] or []
+    rendered_evidence_lines = (
+        [f"- Evidence {index + 1}: {line}" for index, line in enumerate(evidence_lines)]
+        if evidence_lines
+        else ["- Evidence snapshots are unavailable."]
+    )
+    return "\n".join(
+        [
+            f"Direct Answer: {analysis['direct_answer']}",
+            "In-Depth Grounded Analysis:",
+            f"- Tactical pattern: {analysis['tactical_pattern']}.",
+            f"- Shot endings: {analysis['shot_endings']} of {total_sequences}.",
+            f"- Forward progression signals: {analysis['progression_count']} of {total_sequences}.",
+            f"- Reached attacking third: {analysis['attacking_third_count']} of {total_sequences}.",
+            f"- Pass-involved sequences: {analysis['pass_count']} of {total_sequences}.",
+            f"- Carry-involved sequences: {analysis['carry_count']} of {total_sequences}.",
+            f"- Most frequent players: {player_line}.",
+            f"- Team context: {team_line}.",
+            "Evidence Snapshots:",
+            *rendered_evidence_lines,
+            "Scope Note: This answer is grounded only in retrieved sequences, not the full dataset.",
+        ]
+    )
 
-    if shot_count >= max(1, len(evidence) // 2):
-        pattern_text = "The retrieved attacks mostly build toward shots."
-    elif pass_count >= max(1, len(evidence) // 2):
-        pattern_text = "The retrieved attacks are mostly built through passing combinations."
-    elif dribble_count >= max(1, len(evidence) // 2):
-        pattern_text = "The retrieved attacks often include carries to move the ball forward."
-    else:
-        pattern_text = "The retrieved attacks show a mix of short combinations and forward moves."
 
-    if shot_count == 0:
-        shot_text = "None of the retrieved sequences end in a shot."
-    elif shot_count == 1:
-        shot_text = "Only 1 of the retrieved sequences ends in a shot."
-    else:
-        shot_text = f"{shot_count} of the {len(evidence)} retrieved sequences end in a shot."
+def _question_profile(lowered_query: str) -> dict[str, bool]:
+    """Extract lightweight intent flags from the user question."""
 
-    if progression_count >= max(1, len(evidence) // 2):
-        progression_text = "Most of the evidence shows the ball being worked forward into attacking areas."
-    elif progression_count > 0:
-        progression_text = "Some of the evidence shows forward progression, but it is not consistent across every sequence."
-    else:
-        progression_text = "The evidence does not show a strong forward-progression pattern."
+    # Keep this profile simple and deterministic so answers stay stable.
+    return {
+        "asks_count": bool(re.search(r"\bhow many\b|\bcount\b|\bnumber of\b", lowered_query)),
+        "asks_team": bool(re.search(r"\bwhich team\b|\bwhat team\b", lowered_query)),
+        "asks_player": "player" in lowered_query or "who" in lowered_query or "winger" in lowered_query,
+        "asks_shot": "shot" in lowered_query or "finish" in lowered_query or "chance" in lowered_query,
+        "asks_progression": "progress" in lowered_query or "transition" in lowered_query or "attacking third" in lowered_query,
+        "asks_yes_no": bool(re.search(r"^(do|does|did|is|are|can|could|will|would)\b", lowered_query)),
+        "asks_how": lowered_query.startswith("how"),
+    }
 
-    if top_players:
-        player_names = ", ".join(name for name, _ in top_players)
-        player_text = f"The most visible players in these sequences are {player_names}."
-    else:
-        player_text = "The key players are not clear from the retrieved evidence."
 
-    team_text = f"The evidence comes from {', '.join(teams)}." if teams else "The team is not clear from the retrieved evidence."
-    return " ".join([pattern_text, shot_text, progression_text, player_text, team_text])
+def _direct_answer_from_profile(
+    profile: dict[str, bool],
+    stats: dict[str, Any],
+    dominant_team: str | None,
+    dominant_team_count: int,
+    top_players: list[tuple[str, int]],
+    tactical_pattern: str,
+) -> str:
+    """Render a question-aware direct answer from computed evidence stats."""
+
+    # Prioritize exact numeric answers where possible before broad narrative text.
+    total = stats["total_sequences"]
+    shot_endings = stats["shot_endings"]
+    attacking_third = stats["attacking_third_reach_count"]
+    if profile["asks_team"]:
+        if dominant_team:
+            return f"The dominant team in the retrieved evidence is {dominant_team} ({dominant_team_count} of {total} sequences)."
+        return "No team identity is available in the retrieved evidence."
+    if profile["asks_player"]:
+        if top_players:
+            return f"The most frequently involved player is {top_players[0][0]} ({top_players[0][1]} sequences)."
+    if profile["asks_shot"] and profile["asks_yes_no"]:
+        if shot_endings > (total / 2):
+            return f"Yes—shot endings are common ({shot_endings} of {total} sequences)."
+        return f"No—shot endings are not common ({shot_endings} of {total} sequences)."
+    if profile["asks_how"]:
+        return (
+            f"The retrieved evidence suggests {tactical_pattern}, with {shot_endings}/{total} shot endings and {attacking_third}/{total} sequences reaching the attacking third."
+        )
+    if profile["asks_shot"]:
+        return f"{shot_endings} of {total} retrieved sequences ended in a shot."
+    if profile["asks_progression"]:
+        return f"{attacking_third} of {total} retrieved sequences reached the attacking third."
+    if profile["asks_count"]:
+        return f"Count summary: {total} sequences retrieved; {shot_endings} ended in a shot; {attacking_third} reached attacking third."
+    return f"Retrieved {total} relevant sequences with {shot_endings} shot-ending attacks."
 
 
 def build_evidence_stats(evidence: list[dict[str, Any]]) -> dict[str, Any]:
