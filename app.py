@@ -56,7 +56,7 @@ def _auto_prepare() -> None:
         _load_default_data()
     if STATE["index"] is None:
         try:
-            STATE["index"] = build_index(STATE["sequences"])
+            STATE["index"] = build_index(STATE["events"], STATE["sequences"])
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         STATE["trace"]["sequences_indexed"] = len(STATE["sequences"])
@@ -92,9 +92,15 @@ def home() -> str:
     </head>
     <body style="font-family: sans-serif; max-width: 900px; margin: 40px auto; line-height: 1.5;">
       <h1>Local Soccer Intelligence Copilot</h1>
-      <p>Ask a grounded question over the local StatsBomb data stored in the project.</p>
+      <p>Ask grounded questions about the match, teams, players, timelines, or attacking patterns from the local StatsBomb data stored in the project.</p>
       <label>Query</label><br />
-      <textarea id="queryText" style="width: 100%; min-height: 100px; padding: 8px;" placeholder="How does this team create chances?"></textarea>
+      <textarea id="queryText" style="width: 100%; min-height: 100px; padding: 8px;" placeholder="Examples: Give me a match overview. How many shots did Barcelona have? What did Messi do?"></textarea>
+      <p>
+        <label>
+          <input id="useLlm" type="checkbox" />
+          Use Ollama if available
+        </label>
+      </p>
       <p><button onclick="runQuery()">Run Query</button></p>
       <h2>Answer</h2>
       <pre id="answerSource" style="white-space: pre-wrap; background: #f5f5f5; padding: 12px;"></pre>
@@ -105,13 +111,14 @@ def home() -> str:
       <pre id="trace" style="white-space: pre-wrap; background: #f5f5f5; padding: 12px;"></pre>
       <script>
         async function runQuery() {
+          const useLlm = document.getElementById('useLlm').checked;
           const res = await fetch('/query', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
               query: document.getElementById('queryText').value,
-              use_llm: true,
-              llm_required: true
+              use_llm: useLlm,
+              llm_required: false
             })
           });
           const data = await res.json();
@@ -119,9 +126,9 @@ def home() -> str:
         }
         function render(data) {
           const trace = data.trace || {};
-          const source = trace.generation_mode === 'llm' && !trace.llm_fallback
+          const source = trace.use_llm && trace.generation_mode === 'llm' && !trace.llm_fallback
             ? 'Answer source: Ollama'
-            : trace.llm_fallback
+            : trace.use_llm && trace.llm_fallback
               ? 'Answer source: Template fallback'
               : 'Answer source: Template';
           const failureReason = trace.llm_failure_reason ? `\nLLM failure: ${trace.llm_failure_reason}` : '';
@@ -170,7 +177,7 @@ def build_index_route() -> dict[str, Any]:
     # Build the search index in a separate step after data has been ingested.
     _require_ingested()
     try:
-        STATE["index"] = build_index(STATE["sequences"])
+        STATE["index"] = build_index(STATE["events"], STATE["sequences"])
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     STATE["trace"]["sequences_indexed"] = len(STATE["sequences"])

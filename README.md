@@ -25,7 +25,7 @@ Minimal local-first MVP for ingesting StatsBomb-style soccer event JSON, convert
 ```bash
 conda create -n local-soccer-copilot python=3.10
 conda activate local-soccer-copilot
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 ## Optional LLM Mode (Ollama + Gemma 4)
@@ -109,7 +109,7 @@ This gives you a local event file at:
 ## Run
 
 ```bash
-uvicorn app:app --reload
+python -m uvicorn app:app --reload
 ```
 
 Open `http://127.0.0.1:8000`.
@@ -185,6 +185,8 @@ Example with optional Ollama generation:
   "use_llm": true
 }
 ```
+
+If you omit `use_llm`, the API stays on the deterministic template answer path by default.
 
 ## Example Questions
 

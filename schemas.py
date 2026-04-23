@@ -10,15 +10,21 @@ class EventRecord(BaseModel):
 
     match_id: str | None = None
     team_name: str = "Unknown"
+    possession_team_name: str = "Unknown"
     player_name: str = "Unknown"
     event_type: str = "Unknown"
     minute: int = 0
     second: int = 0
+    period: int = 1
     possession_id: int | None = None
     play_pattern: str | None = None
     location: list[float] | None = None
     pass_end_location: list[float] | None = None
+    pass_recipient_name: str | None = None
     shot_outcome: str | None = None
+    shot_xg: float | None = None
+    duration: float | None = None
+    position_name: str | None = None
 
 
 class SequenceRecord(BaseModel):
@@ -32,7 +38,30 @@ class SequenceRecord(BaseModel):
     event_chain: list[str] = Field(default_factory=list)
     ended_in_shot: bool = False
     progression: str = "unknown progression"
+    start_minute: int = 0
+    end_minute: int = 0
+    period: int = 1
+    play_patterns: list[str] = Field(default_factory=list)
     summary: str
+
+
+class DocumentRecord(BaseModel):
+    """Indexed evidence document used for general match retrieval."""
+
+    doc_id: str
+    doc_type: str
+    match_id: str | None = None
+    team_name: str | None = None
+    player_name: str | None = None
+    period: int | None = None
+    minute_start: int | None = None
+    minute_end: int | None = None
+    summary: str
+    text: str
+    players: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    ended_in_shot: bool = False
+    play_patterns: list[str] = Field(default_factory=list)
 
 
 class IngestRequest(BaseModel):
@@ -46,7 +75,7 @@ class QueryRequest(BaseModel):
 
     query: str
     top_k: int = 5
-    use_llm: bool = True
+    use_llm: bool = False
     llm_required: bool = False
 
 
