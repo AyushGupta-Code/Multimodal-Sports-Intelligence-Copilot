@@ -1,2 +1,3 @@
-\__pycache__
-\open-data
+__pycache__/
+.env*.local
+.pytest_cache/

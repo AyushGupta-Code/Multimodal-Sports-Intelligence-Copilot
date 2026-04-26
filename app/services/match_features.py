@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
-from domain_models import DocumentRecord, EventRecord, MatchFacts, SequenceRecord
+from app.models.domain import DocumentRecord, EventRecord, MatchFacts, SequenceRecord
 
 
 def _top_counter_items(counter: Counter[str], limit: int = 5) -> list[tuple[str, int]]:

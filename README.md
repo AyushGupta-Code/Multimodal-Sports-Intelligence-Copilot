@@ -1,6 +1,21 @@
 # Local Soccer Intelligence Copilot
 
-Minimal local-first MVP for ingesting StatsBomb-style soccer event JSON, converting events into simple attacking sequences, indexing those sequence summaries with TF-IDF, and answering grounded tactical questions through a FastAPI API and tiny built-in HTML UI.
+Local-first FastAPI app for ingesting StatsBomb-style soccer event JSON, building attacking-sequence retrieval, and testing a grounded chatbot UI against either deterministic templates or a local Ollama model.
+
+## Current Structure
+
+```text
+app/
+  main.py           FastAPI entrypoint and routes
+  state.py          Shared dataset/index state and auto-prepare helpers
+  api/schemas.py    Request and response DTOs
+  models/domain.py  Internal event, fact, and chat models
+  services/         Data loading, retrieval, generation, and chat logic
+  ui/page.py        HTML shell for the local test UI
+  static/           Frontend JS and CSS served by FastAPI
+data/               Local dataset folder used by default
+tests/              Smoke tests for API, state, and chat flow
+```
 
 ## What It Does
 
@@ -9,8 +24,8 @@ Minimal local-first MVP for ingesting StatsBomb-style soccer event JSON, convert
 - Groups events into simple team-possession attacking sequences.
 - Builds deterministic sequence summaries for retrieval.
 - Uses an in-memory TF-IDF index for local search.
-- Automatically ingests data and builds the index when you run a query in the UI.
-- Returns grounded, intent-aware answers with in-depth evidence analysis and trace metadata.
+- Automatically ingests data and builds the index when you start chatting.
+- Supports local Ollama rewriting while keeping retrieval and evidence grounded.
 
 ## Dependencies
 
@@ -28,118 +43,63 @@ conda activate local-soccer-copilot
 python -m pip install -r requirements.txt
 ```
 
-## Optional LLM Mode (Ollama + Gemma 4)
+## Optional Local LLM With Ollama
 
-The app can use a local Ollama model for answer writing while keeping TF-IDF retrieval and evidence formatting unchanged.
+The app can use a local Ollama model for answer phrasing while leaving retrieval unchanged.
 
-### 1. Install Ollama
-
-On Linux, install Ollama with:
+### 1. Install and run Ollama
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
-```
-
-Start Ollama:
-
-```bash
 ollama serve
 ```
 
-### 2. Download a Local Model
-
-Pull Gemma 4 locally:
+### 2. Pull a model
 
 ```bash
 ollama pull gemma4:26b
 ```
 
-You can also test the model directly from the terminal:
-
-```bash
-ollama run gemma4:26b
-```
-
-### 3. Set the Model Name for the App
-
-In the terminal where you run FastAPI:
-
-```bash
-export OLLAMA_MODEL=gemma4:26b
-```
-
-Optional custom Ollama URL:
+### 3. Point the app at Ollama
 
 ```bash
 export OLLAMA_URL=http://127.0.0.1:11434
+export OLLAMA_MODEL=gemma4:26b
 ```
 
-### 4. Use the Local LLM
+If `OLLAMA_URL` is unset, the UI and API stay on the deterministic template-answer path.
 
-The LLM path is optional. Send `use_llm: true` when you want Gemma 4 to rewrite the grounded answer from the retrieved evidence.
-
-Example `POST /query` body:
-
-```json
-{
-  "query": "How does this team create chances?",
-  "top_k": 5,
-  "use_llm": true
-}
-```
-
-If Ollama is not running or the model is unavailable, the app falls back to the template answer automatically.
-The answers remain grounded in the retrieved evidence; the LLM only improves phrasing.
-
-## Download Local StatsBomb Data
+## Local Dataset
 
 Create the local data folder and download one sample StatsBomb event file:
 
 ```bash
-mkdir -p open-data/data/events
-python3 -c "import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/statsbomb/open-data/master/data/events/15946.json', 'open-data/data/events/15946.json')"
+mkdir -p data/events
+python3 -c "import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/statsbomb/open-data/master/data/events/15946.json', 'data/events/15946.json')"
 ```
 
-This gives you a local event file at:
+The app loads data in this order:
 
-```text
-/mnt/d/Projects/Multimodal-Sports-Intelligence-Copilot/open-data/data/events/15946.json
-```
+- `DATASET_PATH` environment variable, if set
+- `data/events`
 
-## Run
+## Run Locally
 
 ```bash
-python -m uvicorn app:app --reload
+python -m uvicorn app.main:app --reload
 ```
 
 Open `http://127.0.0.1:8000`.
 
-## Point The App To Local StatsBomb JSON
+## Local UI
 
-- The UI now reads local data automatically from:
-  `/mnt/d/Projects/Multimodal-Sports-Intelligence-Copilot/open-data/data/events`
-- You do not need to enter a dataset path in the page.
-- If that folder contains one file, the app uses that file.
-- If that folder contains multiple `.json` files, the app loads all of them.
+The test UI is now split out of `app/main.py`:
 
-The app expects each JSON file to contain a top-level list of StatsBomb-style event dictionaries.
+- `app/ui/page.py` renders the page shell
+- `app/static/styles.css` controls layout and visuals
+- `app/static/app.js` handles sessions, chat turns, reset, evidence, and trace panes
 
-## UI Flow
-
-1. Download the sample data into `open-data/data/events`.
-2. Start the FastAPI server.
-3. Open the UI.
-4. Enter a question and click `Run Query`.
-
-When you click `Run Query`, the app automatically:
-
-- loads the local event data
-- builds attacking sequences
-- builds the TF-IDF index
-- retrieves evidence
-- returns a grounded answer
-
-The built-in page works with the template answer path by default. Use the API request above when you want Ollama-based phrasing.
+This is intended for local iteration only. There is no deployment-specific logic in the current app flow.
 
 ## API
 
@@ -164,46 +124,42 @@ Request body:
 ```json
 {
   "query": "How does this team attack in transition?",
-  "top_k": 5
-}
-```
-
-Response fields:
-
-- `answer`: grounded template-based answer
-- `evidence`: retrieved sequence summaries with scores
-- `trace`: ingestion, indexing, retrieval, and generation metadata
-
-The `/query` route automatically loads the local dataset and builds the index if they are not already ready.
-
-Example with optional Ollama generation:
-
-```json
-{
-  "query": "How does this team create chances?",
   "top_k": 5,
   "use_llm": true
 }
 ```
 
-If you omit `use_llm`, the API stays on the deterministic template answer path by default.
+### `POST /chat`
+
+Request body:
+
+```json
+{
+  "session_id": "existing-session-id",
+  "message": "What about Messi in the second half?",
+  "top_k": 5,
+  "use_llm": true
+}
+```
+
+Response fields:
+
+- `answer`: grounded answer
+- `evidence`: retrieved sequence summaries with scores
+- `trace`: ingestion, indexing, retrieval, and generation metadata
+- `history`: session turn history
 
 ## Example Questions
 
-- `How does this team create chances?`
-- `What are this player's common attacking patterns?`
-- `Find sequences similar to a cutback attack.`
+- `Who won this match?`
+- `Who scored?`
+- `How did Barcelona create chances?`
+- `What about Messi in the second half?`
 - `How does this team attack in transition?`
-- `Show examples of through balls into the half-space.`
-- `Summarize this winger's chance-creation style.`
-
-One simple sample question to try first:
-
-- `How does this team create chances?`
 
 ## Notes
 
 - Retrieval works without any generation model.
-- Answers are grounded only in retrieved evidence.
-- Optional LLM generation uses a local Ollama model and falls back to the template answer on failure.
-- Phase 1 is event-data only and keeps everything in memory for simplicity.
+- Answers stay grounded in retrieved evidence.
+- Ollama is optional and local-only.
+- The app is organized as a single Python package for local testing before any future frontend/backend split.

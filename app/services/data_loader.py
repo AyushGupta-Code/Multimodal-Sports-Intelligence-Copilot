@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from domain_models import EventRecord
+from app.models.domain import EventRecord
 
 
 def _safe_name(value: Any, fallback: str | None = "Unknown") -> str | None:

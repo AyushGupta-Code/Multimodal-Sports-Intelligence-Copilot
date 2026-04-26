@@ -6,9 +6,9 @@ import re
 import uuid
 from typing import Any
 
-from domain_models import ChatSession, ChatTurn
-from generation import run_query
-from retrieval_engine import extract_query_entities
+from app.models.domain import ChatSession, ChatTurn
+from app.services.generation import run_query
+from app.services.retrieval import extract_query_entities
 
 
 class ChatSessionStore:

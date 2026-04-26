@@ -8,8 +8,8 @@ from typing import Any
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import linear_kernel
 
-from domain_models import DocumentRecord, EventRecord, MatchFacts, SequenceRecord
-from match_features import build_documents, build_match_facts
+from app.models.domain import DocumentRecord, EventRecord, MatchFacts, SequenceRecord
+from app.services.match_features import build_documents, build_match_facts
 
 
 def _normalize_text(value: str) -> str:

@@ -10,9 +10,9 @@ import urllib.request
 from collections import Counter
 from typing import Any
 
-from domain_models import MatchFacts
-from retrieval_engine import build_query_profile, extract_query_entities, retrieve
-from schemas import QueryResponse
+from app.api.schemas import QueryResponse
+from app.models.domain import MatchFacts
+from app.services.retrieval import build_query_profile, extract_query_entities, retrieve
 
 
 def _top_counter_items(counter: Counter[str], limit: int = 5) -> list[tuple[str, int]]:
